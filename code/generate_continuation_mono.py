@@ -1,15 +1,17 @@
-
+import argparse
 from functools import partial
 import glob
+import os
 
+import keras
 from keras.layers import Input
-from keras.models import Model, load_model
+from keras.models import Model
 import numpy as np
-from sklearn.utils import shuffle
-import sys
 
-from Dataset import convert_df_to_score, score_event_to_nnet_input_list
-from Dataset import get_file_list, read_dataset, get_examples_for_song
+from data_processing import read_input_file, preprocess_data
+
+
+NUM_LSTM_NODES = 1024             # Num of intermediate LSTM nodes
 
 SIG_FIGS = 5
 SIG_DIGITS = 4
@@ -67,63 +69,12 @@ pc_to_degree_sharp_key = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6]
 
 
 
-TEST_FILES = sorted(glob.glob(TEST_PATH))
-
-
-def example_generator(teacher_forcing=USE_TEACHER_FORCING):
-    files = TEST_FILES
-
-    while True:
-        for file in shuffle(files):
-            # print('new FILE!')
-            x, y = load_dataset(file)
-
-            if ADD_START:
-                # Insert room for START data as feature 0
-                y = np.concatenate((np.expand_dims(
-                    np.array([[0] * (OUTPUT_TIMESTEPS - 1)] * len(y)), axis=2),
-                                    y), axis=2)
-
-                # Insert START symbol (1 and then 0s) before each example in y data
-                z = np.array([[[1] + [0] * (VEC_LENGTH - 1)]] * len(y))
-                y = np.hstack((z, y))
-
-            # Now create the desired data format for the encoder/decoder pieces:
-            #                INPUTS                             OUTPUTS (command, midi, duration one-hots)
-            # ([encoder_input_data, decoder_input_data], [decoder_target_data1, decoder_target_data2, decoder_target_data3])
-
-            y_shifted = y[:, 1:, :] if ADD_START else y
-            decoder_target_data1 = y_shifted[:, :,
-                                   COMMAND_VEC_RANGE[0]:COMMAND_VEC_RANGE[1]]
-            decoder_target_data2 = y_shifted[:, :,
-                                   MIDI_VEC_RANGE[0]:MIDI_VEC_RANGE[1]]
-            decoder_target_data3 = y_shifted[:, :,
-                                   DURATION_VEC_RANGE[0]:DURATION_VEC_RANGE[1]]
-
-            for i in range(0, len(x), BATCH_SIZE):
-                # print('new batch')
-                j = i + BATCH_SIZE
-                if teacher_forcing:
-                    yield ([x[i: j], y[i: j, :-1]],
-                           [decoder_target_data1[i: j],
-                            decoder_target_data2[i: j],
-                            decoder_target_data3[i: j]])
-                else:
-                    yield (x[i: j],
-                           [decoder_target_data1[i: j],
-                            decoder_target_data2[i: j],
-                            decoder_target_data3[i: j]])
-
-validation_generator = example_generator()
-
-# Utils
-
-
 # Load from disk; reconstruct inference model
 # Returns a function that performs inference on a given sequence.
 def load_model():
-    model = load_model('s2s_mono_continuation.h5')
-
+    print('Loading model...')
+    model = keras.models.load_model('s2s_mono_continuation.h5')
+    print('Reconstructing model architecture:')
     encoder_inputs = model.get_layer(name='encoder_input').input
     encoder_lstm_1 = model.get_layer(name='encoder_lstm_1')
     encoder_states1 = encoder_lstm_1.output[1:3]
@@ -142,7 +93,6 @@ def load_model():
 
     # Define sampling models
     encoder_model1 = Model(encoder_inputs, encoder_states1)
-    encoder_model1.summary()
 
     encoder_model2 = Model(encoder_inputs, encoder_states2)
     encoder_model2.summary()
@@ -176,6 +126,7 @@ def load_model():
         [decoder_outputs_final1, decoder_outputs_final2,
          decoder_outputs_final3] + decoder_states1 + decoder_states2)
 
+    decoder_model.summary()
 
     def seq2seq_from_models(encoder_model1, encoder_model2, decoder_model,
                             input_seq):
@@ -243,7 +194,7 @@ def midi_to_mnn(midi, flat_key=True):
 
 
 def seq_to_tuples(seq, start_time=100, channel=0, flat_key=True):
-    t = start_time  # time in beats, integer
+    t = round(start_time, SIG_DIGITS)  # time in beats
     subbeat = 0  # curent subbeat in beat for t, range is 0 to QUANTIZATION-1
 
     notes = []
@@ -258,7 +209,7 @@ def seq_to_tuples(seq, start_time=100, channel=0, flat_key=True):
         if command == 3:
             # Record note/rest start data.
             cur_dur = dur
-            cur_note_start = round(t + subbeat / QUANTIZATION, SIG_FIGS)
+            cur_note_start = round(t + subbeat / QUANTIZATION, SIG_DIGITS)
 
             # Update current time.
             subbeat += dur
@@ -270,7 +221,7 @@ def seq_to_tuples(seq, start_time=100, channel=0, flat_key=True):
         elif command == 2:
             if cur_note:
                 notes.append((cur_note_start, midi, mnn,
-                              round(cur_dur / QUANTIZATION, SIG_FIGS),
+                              round(cur_dur / QUANTIZATION, SIG_DIGITS),
                               channel))
             cur_note = midi + MIDI_MIN - 1  # -1 for the 0 case
 
@@ -278,7 +229,7 @@ def seq_to_tuples(seq, start_time=100, channel=0, flat_key=True):
         elif command == 1:
             if cur_note:
                 notes.append((cur_note_start, midi, mnn,
-                              round(cur_dur / QUANTIZATION, SIG_FIGS),
+                              round(cur_dur / QUANTIZATION, SIG_DIGITS),
                               channel))
             cur_note = 0
     return notes
@@ -299,10 +250,13 @@ def target_outputs_to_tuples(N, target1, target2, target3):
     return seq_to_tuples(target_outputs_to_seq(N, target1, target2, target3))
 
 
-def seq_to_csv(seq, filename='tst.csv'):
+def seq_to_csv(seq, filename='tst.csv', start_time=100, channel=0):
     with open(filename, 'w') as f:
         f.writelines(
-            ','.join(str(x) for x in tup) + '\n' for tup in seq_to_tuples(seq))
+            ','.join(str(x) for x in tup) + '\n'
+            for tup in seq_to_tuples(seq,
+                                     start_time=start_time,
+                                     channel=channel))
 
 
 def predict_for_files(seq2seq, input_generator):
@@ -312,7 +266,9 @@ def predict_for_files(seq2seq, input_generator):
             if ex % 100 == 0:
                 print(ex)
             seq = seq2seq(np.expand_dims(x[i], axis=0))
-            seq_to_csv(seq, filename='outputs/validation_output_%08d.csv' % ex)
+            seq_to_csv(seq,
+                       filename='outputs/validation_output_%08d.csv' % ex,
+                       start_time=100)
             ex += 1
 
 
@@ -321,13 +277,52 @@ if __name__ == '__main__':
     print('MIREX 2018: Patterns for Prediction (Eric Nichols)')
     print('--------------------------------------------------')
 
-    if sys.argv < 3:
-        print('Usage: %s input_folder output_folder' % sys.args[0])
+    parser = argparse.ArgumentParser(
+        description='Generate continuations for symbolic monophonic music.')
+    parser.add_argument('--input', '-i', metavar='INPUT_PATH', nargs=1,
+                        help='Path to the input file directory')
+    parser.add_argument('--output', '-o', metavar='OUTPUT_PATH', nargs=1,
+                        help='Path to the output file directory')
 
-    INPUT_PATH = sys.args[1]
-    OUTPUT_PATH = sys.args[2]
+    args = parser.parse_args()
+
+    input_files = glob.glob(os.path.join(args.input[0], '*.csv'))
+    output_path = args.output[0]
+
+    num_input_files = len(input_files)
+    print('Found %d files' % num_input_files)
+    print('Writing output to %s\n' % output_path)
 
     seq2seq = load_model()
-    predict_for_files(seq2seq, ...)
+
+    # Process each file.
+    print('Processing...')
+    num_success = 0
+    for i, filename in enumerate(input_files):
+        if i and i % 10 == 0:
+            print('Processed %d of %d' % (i, num_input_files))
+
+        try:
+            # Load data
+            data, end_time, channel = read_input_file(filename)
+            data_processed = preprocess_data(data, INPUT_TIMESTEPS)
+
+            # Predict.
+            seq = seq2seq(np.expand_dims(data_processed, axis=0))
+
+            # Write to disk.
+            filebase, _ = os.path.splitext(os.path.basename(filename))
+            seq_to_csv(seq,
+                       os.path.join(output_path, filebase + '_continued.csv'),
+                       start_time=end_time,
+                       channel=channel)
+            num_success += 1
+
+        except Exception as e:
+            print('ERROR: Problem processing file %s.' % filename)
+            print('Exception: %s' % str(e))
+            print('Continuing...\n')
+    print('Done! Wrote %d files to %s' % (num_success, output_path))
+
 
 

@@ -111,7 +111,10 @@ class Duration():
         self.beats = beats
         self.subbeats = subbeats
         self.quantization = quantization
-    
+
+    def total_beats(self):
+        return self.beats + self.subbeats / self.quantization
+
     def total_subbeats(self):
         return self.beats * self.quantization + self.subbeats
     
@@ -304,6 +307,60 @@ def get_file_list(path, ext):
 # Read Dataset
 
 all_scores = []
+
+def get_score_end_time(score):
+    """Return the timestamp just after the final note in the score ends."""
+    if not score:
+        return 0
+    last_event = score[-1]
+
+    if last_event.time_delta is None:
+        return last_event.time
+
+    return last_event.time + last_event.time_delta.total_beats()
+
+def read_input_file(filepath):
+    """Reads a CSV of note events.
+
+    Output is a tuple of
+    1) matrix ready as input for neural net
+    2) end time of score (float)
+    3) channel #
+    """
+    df = pd.read_csv(filepath,
+                     header=None,
+                     names=['time', 'midi', 'mpn', 'duration', 'channel'])
+    score = convert_df_to_score(df)
+    end_time = get_score_end_time(score)
+    channel = int(df['channel'][0])
+    return score_to_array(score), end_time, channel
+
+
+def preprocess_data(data, desired_length):
+    """Forces the data to be the desired length.
+
+    Input is a 2D matrix of [timestep, features].
+    desired_length is in the first (time) dimension.
+
+    Output is another 2D matrix.
+    """
+    if len(data) < 1:
+        raise Exception('Input score is length 0.')
+    if len(data) == desired_length:
+        return data
+
+    # Copy/paste to left to pad short input sequences if necessary
+    # First, make extra copies of content until long enough.
+    x = data
+    while len(x) < desired_length:
+        x = np.vstack((x, data))
+
+    # Cut extra length at start if necessary.
+    if len(x) > desired_length:
+        x = x[len(x) - desired_length:]
+
+    return x
+
 
 def read_dataset():
     # all_durations = set()
