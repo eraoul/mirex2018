@@ -264,16 +264,6 @@ def score_to_array(score):
         arrays_list.append(np.array(score_event_to_nnet_input_list(ev)))
     return np.vstack(arrays_list)
 
-
-def plot_matrix(x):
-    plt.figure(figsize=(20,10))
-    plt.imshow(x, origin='lower')
-    plt.show()
-
-def plot_score(score):
-    plot_matrix(score_to_array(score).T)
-
-
 # MIDI
 
 def get_midi_set(score):
