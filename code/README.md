@@ -20,8 +20,7 @@ parameters
 
 ## Installation
 
-# Run
-To run the program, it is recommended to run in a python 
+To install the program, it is recommended to set up a python 
 virtual environment such as conda. 
 
 Create a virtual environment for **python 3.6**.
@@ -35,3 +34,9 @@ tensorflow.org for install notes.
 * **pandas** -- `pip install pandas`
 * **numpy** 1.14 -- Just verify installation. Should be installed 
 by the tensorflow install process.
+
+# Run
+
+Run the command with the syntax:
+
+`python3 generate_continuation_mono.py -i <INPUT_PATH> -o <OUTPUT_PATH>`
